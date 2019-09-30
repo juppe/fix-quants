@@ -42,7 +42,18 @@
 #       --------------------
 #
 #       Attention to reserved quantities !!!
-
+#
+#
+#       How to improve execution speed ?
+#       ---------------------------------
+#
+#       drop the following indexes if still exists: (the create index are here for information only)
+#       -- CREATE INDEX stock_pack_operation_location_id_fkey_mig_idx ON public.stock_move_line USING btree (location_id)
+#       drop index stock_pack_operation_location_id_fkey_mig_idx;
+#
+#       -- CREATE INDEX stock_pack_operation_location_dest_id_fkey_mig_idx ON public.stock_move_line USING btree (location_dest_id)
+#       drop index stock_pack_operation_location_dest_id_fkey_mig_idx
+#
 
 INVENTORY_LOCATION_ID = 5
 PRODUCT_MIN_ID = 0
