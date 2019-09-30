@@ -1,4 +1,40 @@
 
+# This script should fix the quants,
+
+# How to use it ?
+# ----------------
+# 1. Adapt the script or odoo code.
+#     1.1 Add the print opcode to debug.
+#         1.1.1. search for 'def safe_eval' in all code or in odoo/odoo/tools/safe_eval.py
+#         1.1.2. add the print opcode:
+#             just above the 'def safe_eval' there is a list of allowed builtins, all the print
+#             ...
+#             'Exception': Exception,
+#             'print': print, <----------------------------- add tyhis line
+#         1.1.3. save and restart odoo-bin to take the change into account
+#         or
+#     1.2 comment all the print in this script (replace all 'print' by '#print')
+# 1. Check the global variable below.
+# 2. Copy the code in a server action and run it
+
+# How does it works ?
+# --------------------
+# here is a very small summary of what it does.
+
+# take a backup
+# for each for stockable product in the range [PRODUCT_MIN_ID ;PRODUCT_MAX_ID]
+#     for each stock_location with 'internal' usage:
+#         # realign the quants regarding the stock_move_line
+#         look in stock_move_line what quantity should be in this location
+#         find the current quantity in stock_quant
+#         insert a new quant with the delta
+#         # give the more precise quant quantity.
+#         find latest inventory adjustment, take note of the date and current quantities
+#         apply the stock_move_line delta from the inventory date.
+#         as now know what should be the quant value (and what is the current quant value)
+#         apply delta and create a new quant if needed
+#         merge the quants
+# take a backup
 
 
 INVENTORY_LOCATION_ID = 5
@@ -6,12 +42,14 @@ PRODUCT_MIN_ID = 55
 PRODUCT_MAX_ID = 60
 TIMESTAMP = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
 
-def take_v12_backup():
+def take_v12_backup(before_after):
     "create a backup of stock_quant, stock_move and stock_move_line"
 
-    env.cr.execute("CREATE TABLE stock_quant_bck_%s AS SELECT * FROM stock_quant" % TIMESTAMP)
-    env.cr.execute("CREATE TABLE stock_move_bck_%s AS SELECT * FROM stock_move" % TIMESTAMP)
-    env.cr.execute("CREATE TABLE stock_move_line_bck_%s AS SELECT * FROM stock_move_line" % TIMESTAMP)
+    if before_after not in ['before','after']:
+        raise Exception('before_after should be before of after')
+    env.cr.execute("CREATE TABLE stock_quant_%s_%s AS SELECT * FROM stock_quant" % (before_after, TIMESTAMP))
+    env.cr.execute("CREATE TABLE stock_move_%s_%s AS SELECT * FROM stock_move" % (before_after, TIMESTAMP))
+    env.cr.execute("CREATE TABLE stock_move_line_%s_%s AS SELECT * FROM stock_move_line" % (before_after, TIMESTAMP))
 
 def merge_quant(product_id, location_id):
     env.cr.execute("""
@@ -428,7 +466,7 @@ def is_stockable_product(product_id):
 
 # TEST TEST TEST
 
-take_v12_backup()
+take_v12_backup('before')
 
 for product_id in range(PRODUCT_MIN_ID, PRODUCT_MAX_ID):
     if not is_stockable_product(product_id):
@@ -443,4 +481,4 @@ for product_id in range(PRODUCT_MIN_ID, PRODUCT_MAX_ID):
         set_quants(product_id,location_id)
         merge_quant(product_id, location_id)
 
-
+take_v12_backup('after')
