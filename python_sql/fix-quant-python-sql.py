@@ -1,45 +1,52 @@
 
-# This script should fix the quants,
-
-# How to use it ?
-# ----------------
-# 1. Adapt the script or odoo code.
-#     1.1 Add the print opcode to debug.
-#         1.1.1. search for 'def safe_eval' in all code or in odoo/odoo/tools/safe_eval.py
-#         1.1.2. add the print opcode:
-#             just above the 'def safe_eval' there is a list of allowed builtins, all the print
-#             ...
-#             'Exception': Exception,
-#             'print': print, <----------------------------- add tyhis line
-#         1.1.3. save and restart odoo-bin to take the change into account
-#         or
-#     1.2 comment all the print in this script (replace all 'print' by '#print')
-# 1. Check the global variable below.
-# 2. Copy the code in a server action and run it
-
-# How does it works ?
-# --------------------
-# here is a very small summary of what it does.
-
-# take a backup
-# for each for stockable product in the range [PRODUCT_MIN_ID ;PRODUCT_MAX_ID]
-#     for each stock_location with 'internal' usage:
-#         # realign the quants regarding the stock_move_line
-#         look in stock_move_line what quantity should be in this location
-#         find the current quantity in stock_quant
-#         insert a new quant with the delta
-#         # give the more precise quant quantity.
-#         find latest inventory adjustment, take note of the date and current quantities
-#         apply the stock_move_line delta from the inventory date.
-#         as now know what should be the quant value (and what is the current quant value)
-#         apply delta and create a new quant if needed
-#         merge the quants
-# take a backup
+#        This script should fix the quants,
+#
+#        How to use it ?
+#        ----------------
+#
+#        1. Adapt the script or odoo code.
+#            1.1 Add the print opcode to debug.
+#                1.1.1. search for 'def safe_eval' in all code or in odoo/odoo/tools/safe_eval.py
+#                1.1.2. add the print opcode:
+#                    just above the 'def safe_eval' there is a list of allowed builtins, all the print
+#                    ...
+#                    'Exception': Exception,
+#                    'print': print, <----------------------------- add tyhis line
+#                1.1.3. save and restart odoo-bin to take the change into account
+#                or
+#            1.2 comment all the print in this script (replace all 'print' by '#print')
+#        1. Check the global variable below.
+#        2. Copy the code in a server action and run it
+#
+#
+#        How does it works ?
+#        --------------------
+#
+#        Here is a very small summary of what it does:
+#        take a backup
+#        for each for stockable product in the range [PRODUCT_MIN_ID ;PRODUCT_MAX_ID]
+#            for each stock_location with 'internal' usage:
+#                # realign the quants regarding the stock_move_line
+#                look in stock_move_line what quantity should be in this location
+#                find the current quantity in stock_quant
+#                insert a new quant with the delta
+#                # give the more precise quant quantity.
+#                find latest inventory adjustment, take note of the date and current quantities
+#                apply the stock_move_line delta from the inventory date.
+#                as now know what should be the quant value (and what is the current quant value)
+#                apply delta and create a new quant if needed
+#                merge the quants
+#        take a backup
+#
+#       What are the risks ?
+#       --------------------
+#
+#       Attention to reserved quantities !!!
 
 
 INVENTORY_LOCATION_ID = 5
-PRODUCT_MIN_ID = 55
-PRODUCT_MAX_ID = 60
+PRODUCT_MIN_ID = 0
+PRODUCT_MAX_ID = -1
 TIMESTAMP = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
 
 def take_v12_backup(before_after):
@@ -152,10 +159,10 @@ def find_desired_quant_value(product_id, location_id):
     """
 
     latest_inventory_date, latest_inventory_qty = find_latest_inventory_adjustment(product_id, location_id)
-    print('latest_inventory_date: %s' % latest_inventory_date)
-    print('latest_inventory_qty: %s' % latest_inventory_qty)
+    print('  latest_inventory_date: %s' % latest_inventory_date)
+    print('  latest_inventory_qty: %s' % latest_inventory_qty)
     delta_moves = find_delta_move(location_id, product_id, latest_inventory_date)
-    print('delta_moves_since_inventory: %s' % delta_moves)
+    print('  delta_moves_since_inventory: %s' % delta_moves)
     return latest_inventory_qty + delta_moves
 
 def sql_inventory_adjustment(product_id, qty, location_id, location_dest_id):
@@ -215,7 +222,7 @@ def sql_inventory_adjustment(product_id, qty, location_id, location_dest_id):
                     %s, ---------------------------------------- product_id
                     %s, ---------------------------------------- product_uom
                     %s,  --------------------------------------- product_uom_qty
-                    'confirmed' --state
+                    'done' --state
                 )
                 returning id;
     """
@@ -333,7 +340,6 @@ def find_current_quant_value(product_id, location_id):
         AND product_id = %s
     """, (location_id, product_id))
     current_quant_value = env.cr.fetchone()[0]
-    print("current_quant_value :%s" % current_quant_value)
     return current_quant_value
 
 def realign_quant_with_moves(product_id, location_id):
@@ -386,7 +392,7 @@ def realign_quant_with_moves(product_id, location_id):
     quant_current_value = find_current_quant_value(product_id, location_id)
 
     quant_delta = quant_value_according_to_sml - quant_current_value
-    print("align quant with moves (%s)" % quant_delta )
+    print("  align quant with moves (%s)" % quant_delta )
     insert_quant_query = """
         INSERT INTO "stock_quant"
         (
@@ -421,19 +427,21 @@ def set_quants(product_id, location_id):
     "realign the quants"
 
     quant_desired_value = find_desired_quant_value(product_id, location_id)
+    print("  quant_desired_value (%s)" % (quant_desired_value,))
     quant_current_value = find_current_quant_value(product_id, location_id)
+    print("  quant_current_value (%s)" % (quant_current_value,))
     quant_delta = quant_desired_value - quant_current_value
     if quant_delta == 0:
-        print("adapt the quant (+0) (already at the good value)")
+        print("  adapt the quant (+0) (already at the good value)")
         return
     elif quant_delta > 0:
         location_dest_id = location_id
         location_id = INVENTORY_LOCATION_ID
-        print("adapt the quant (+%s)" % quant_delta)
+        print("  adapt the quant (+%s)" % quant_delta)
     else:
         location_dest_id = INVENTORY_LOCATION_ID
         quant_delta = -quant_delta
-        print("adapt the quant (%s)" % quant_delta)
+        print("  adapt the quant (%s)" % quant_delta)
 
     sql_inventory_adjustment(product_id, quant_delta, location_id, location_dest_id)
 
@@ -459,26 +467,40 @@ def is_stockable_product(product_id):
                     WHERE pp.id = %s
                     """, (product_id,))
     if not env.cr.rowcount:
-        print("no template for product %s" % (product_id,))
+        print("  no template for product %s" % (product_id,))
         return
     else:
         return env.cr.fetchone()[0] == "product"
 
-# TEST TEST TEST
+def max_product_id():
+    env.cr.execute("""SELECT max(id) FROM product_product""")
+    return env.cr.fetchone()[0]
 
-take_v12_backup('before')
+def do_the_thing():
+    take_v12_backup('before')
 
-for product_id in range(PRODUCT_MIN_ID, PRODUCT_MAX_ID):
-    if not is_stockable_product(product_id):
-        continue
-    location_ids = find_locations(product_id)
-    if not location_ids:
-        print("no possible location if for product %s" % product_id)
-        continue
-    for location_id in location_ids:
-        print("prepare to realign product %s on location %s" % (product_id, location_id,))
-        realign_quant_with_moves(product_id, location_id)
-        set_quants(product_id,location_id)
-        merge_quant(product_id, location_id)
+    for product_id in range(PRODUCT_MIN_ID, PRODUCT_MAX_ID + 1):
+        if not is_stockable_product(product_id):
+            print("%s - product %s is not a stockable product, skip" %
+            (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id,))
+            continue
+        location_ids = find_locations(product_id)
+        if not location_ids:
+            print("%s - no location_id for product %s, skip" %
+            (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id,))
+            continue
+        for location_id in location_ids:
+            print("%s - prepare to handle product %s on location %s" %
+            (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id, location_id,))
+            realign_quant_with_moves(product_id, location_id)
+            set_quants(product_id,location_id)
+            #merge_quant(product_id, location_id)
+            current_quant = find_current_quant_value(product_id, location_id)
+            print("  current quant quantity: %s" % current_quant)
 
-take_v12_backup('after')
+    take_v12_backup('after')
+
+if PRODUCT_MAX_ID == -1:
+    PRODUCT_MAX_ID = max_product_id()
+
+do_the_thing()
