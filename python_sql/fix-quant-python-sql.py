@@ -67,6 +67,7 @@ INVENTORY_LOCATION_ID = 5
 TIMESTAMP = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
 CRON_ID = datetime.datetime.now().strftime('%f')
 MAX_OFFSET = 10000
+COMMIT_EACH_PRODUCT = False
 
 def take_v12_backup(before_after):
     "create a backup of stock_quant, stock_move and stock_move_line"
@@ -495,14 +496,14 @@ def max_product_id():
     env.cr.execute("""SELECT max(id) FROM product_product""")
     return env.cr.fetchone()[0]
 
-def get_next_product():
+def get_next_product(last_product_id):
   found_product = False
   offset = 0
   while not found_product:
     print("get_next_product: offset:%s cron_id:%s" % (offset,CRON_ID,))
     env.cr.execute("savepoint acquire_lock")
     try:
-      env.cr.execute("select min(id) + %s from product_locks where processed = 'f' ", (offset,))
+      env.cr.execute("select min(id) + %s from product_locks where processed = 'f' and id > %s ", (offset,last_product_id,))
       min_id = env.cr.fetchone()[0]
       offset += 1
       env.cr.execute("select id from product_locks where id = %s for update nowait",(min_id,))
@@ -518,33 +519,36 @@ def processed(product_id):
 
 def do_the_thing():
 
-    product_id = get_next_product()
+    product_id = get_next_product(0)
     while product_id:
         if not is_stockable_product(product_id):
             print("%s - product %s is not a stockable product, skip" %
             (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id,))
             processed(product_id)
-            env.cr.commit()
-            product_id = get_next_product()
+            if COMMIT_EACH_PRODUCT:
+                env.cr.commit()
+            product_id = get_next_product(product_id)
             continue
         location_ids = find_locations(product_id)
         if not location_ids:
             print("%s - no location_id for product %s, skip" %
             (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id,))
             processed(product_id)
-            env.cr.commit()
-            product_id = get_next_product()
+            if COMMIT_EACH_PRODUCT:
+                env.cr.commit()
+            product_id = get_next_product(product_id)
             continue
         for location_id in location_ids:
             print("%s - prepare to handle product %s on location %s (cron: %s)" %
             (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id, location_id, CRON_ID))
             realign_quant_with_moves(product_id, location_id)
             set_quants(product_id,location_id)
-            #merge_quant(product_id, location_id)
+            merge_quant(product_id, location_id)
             current_quant = find_current_quant_value(product_id, location_id)
             print("  current quant quantity: %s" % current_quant)
             processed(product_id)
-            env.cr.commit()
-            product_id = get_next_product()
+            if COMMIT_EACH_PRODUCT:
+                env.cr.commit()
+            product_id = get_next_product(product_id)
 
 do_the_thing()
