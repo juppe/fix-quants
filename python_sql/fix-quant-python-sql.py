@@ -484,37 +484,6 @@ def set_quants(product_id, location_id):
 
     sql_inventory_adjustment(product_id, quant_delta, location_id, location_dest_id)
 
-def find_locations(product_id):
-    "find possible locations for quants based on sml"
-    env.cr.execute("""
-    SELECT l.lid AS location_id FROM
-        (
-        SELECT DISTINCT location_id lid FROM stock_move_line WHERE product_id = %s
-        UNION
-        SELECT DISTINCT location_dest_id lid FROM stock_move_line WHERE product_id = %s
-        )l
-        JOIN stock_location ll ON l.lid = ll.id
-        WHERE ll.usage = 'internal'
-    """, (product_id, product_id,))
-    return [r['location_id'] for r in env.cr.dictfetchall()]
-
-def is_stockable_product(product_id):
-    env.cr.execute("""
-                    SELECT type
-                    FROM product_template pt
-                    JOIN product_product pp ON pt.id = pp.product_tmpl_id
-                    WHERE pp.id = %s
-                    """, (product_id,))
-    if not env.cr.rowcount:
-        log("  no template for product %s" % (product_id,))
-        return
-    else:
-        return env.cr.fetchone()[0] == "product"
-
-def max_product_id():
-    env.cr.execute("""SELECT max(id) FROM product_product""")
-    return env.cr.fetchone()[0]
-
 def get_next_product(offset):
   while True:
     log("get_next_product: offset:%s cron_id:%s" % (offset, CRON_ID, ))
