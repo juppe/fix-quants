@@ -1,25 +1,6 @@
-
 #        This script should fix the quants,
 #
-#        How to use it ?
-#        ----------------
-#
-#        1. Adapt the script or odoo code.
-#            1.1 Add the print opcode to debug.
-#                1.1.1. search for 'def safe_eval' in all code or in odoo/odoo/tools/safe_eval.py
-#                1.1.2. add the print opcode:
-#                    just above the 'def safe_eval' there is a list of allowed builtins, all the print
-#                    ...
-#                    'Exception': Exception,
-#                    'print': print, <----------------------------- add this line
-#                1.1.3. save and restart odoo-bin to take the change into account
-#                or
-#            1.2 comment all the print in this script (replace all 'print' by '#print')
-#        1. Check the global variable below.
-#        2. Copy the code in a server action and run it
-#
-#
-#        How does it works ?
+#        How does it work ?
 #        --------------------
 #
 #        Here is a very small summary of what it does:
@@ -42,7 +23,7 @@
 #       --------------------
 #
 #       Attention to reserved quantities !!!
-#       The script shouldn't be executed a second time !!!
+#       A specific prouct shouldn't be fixed second time !!!
 #
 #       How to improve execution speed ?
 #       ---------------------------------
@@ -58,16 +39,17 @@
 #       Before running the script :
 #       ---------------------------
 #
-#       You can now start the same cron many time ... but you need some preparation
+#       You can now start the same cron many times ... but you need some preparation
 #       - make a backup before and after
 #       - create the following table:
-#           CREATE TABLE product_locks AS SELECT id, 'f' AS processed FROM product_product;
+#           CREATE TABLE product_locks (id SERIAL PRIMARY KEY, product_id INTEGER, processed BOOLEAN);
+#           INSERT INTO product_locks select nextval('product_locks_id_seq'), id, false from product_product;
 
 INVENTORY_LOCATION_ID = 5
 TIMESTAMP = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
 CRON_ID = datetime.datetime.now().strftime('%f')
-MAX_OFFSET = 10000
-COMMIT_EACH_PRODUCT = False
+COMMIT_EACH_PRODUCT = True
+MIGRATION_DATE = '2019-08-16 09:00:00'
 
 def take_v12_backup(before_after):
     "create a backup of stock_quant, stock_move and stock_move_line"
@@ -154,20 +136,27 @@ def find_latest_inventory_adjustment(product_id, location_id):
 
     query = """
         SELECT date, product_qty FROM (
-        (
-        SELECT il.id, date, product_qty FROM stock_inventory i -- needed to have the state
-        JOIN stock_inventory_line il ON il.inventory_id = i.id
-        WHERE i.state = 'done'
-        AND il.location_id = %s
-        AND il.product_id = %s
-        )
-    UNION ALL
-        (SELECT -1 AS id, '1930-09-26' AS date, 0 AS product_qty)
-    )A
-    ORDER BY date DESC, id DESC
-    LIMIT 1
+            (
+                SELECT il.id, date, product_qty
+                FROM stock_inventory i -- needed to have the state
+                JOIN stock_inventory_line il ON il.inventory_id = i.id
+                WHERE i.state = 'done'
+                AND i.date > %s
+                AND il.location_id = %s
+                AND il.product_id = %s
+            )
+            UNION ALL
+            (
+                SELECT -1 AS id, %s AS date, COALESCE(sum(quantity),0) AS product_qty
+                FROM migrated_stock_quant
+                WHERE location_id = %s
+                AND product_id = %s
+            )
+        ) A
+        ORDER BY date DESC, id DESC
+        LIMIT 1
     """
-    env.cr.execute(query, (location_id,product_id,))
+    env.cr.execute(query, (MIGRATION_DATE,location_id,product_id,MIGRATION_DATE,location_id,product_id,))
     res = env.cr.fetchone()
     return (res[0], res[1],)
 
@@ -179,10 +168,10 @@ def find_desired_quant_value(product_id, location_id):
     """
 
     latest_inventory_date, latest_inventory_qty = find_latest_inventory_adjustment(product_id, location_id)
-    print('  latest_inventory_date: %s' % latest_inventory_date)
-    print('  latest_inventory_qty: %s' % latest_inventory_qty)
+    log('  latest_inventory_date: %s' % latest_inventory_date)
+    log('  latest_inventory_qty: %s' % latest_inventory_qty)
     delta_moves = find_delta_move(location_id, product_id, latest_inventory_date)
-    print('  delta_moves_since_inventory: %s' % delta_moves)
+    log('  delta_moves_since_inventory: %s' % delta_moves)
     return latest_inventory_qty + delta_moves
 
 def sql_inventory_adjustment(product_id, qty, location_id, location_dest_id):
@@ -222,7 +211,8 @@ def sql_inventory_adjustment(product_id, qty, location_id, location_dest_id):
                     "product_id",
                     "product_uom",
                     "product_uom_qty",
-                    "state"
+                    "state",
+                    "reference"
                 )
                 VALUES
                 (
@@ -242,7 +232,8 @@ def sql_inventory_adjustment(product_id, qty, location_id, location_dest_id):
                     %s, ---------------------------------------- product_id
                     %s, ---------------------------------------- product_uom
                     %s,  --------------------------------------- product_uom_qty
-                    'done' --state
+                    'done', --state
+                    'Realigning moves and quants 10/2019'
                 )
                 returning id;
     """
@@ -267,7 +258,8 @@ def sql_inventory_adjustment(product_id, qty, location_id, location_dest_id):
                         "qty_done",
                         "done_wo",
                         "product_qty",
-                        "state"
+                        "state",
+                        "reference"
                     )
                 VALUES
                     (
@@ -287,7 +279,8 @@ def sql_inventory_adjustment(product_id, qty, location_id, location_dest_id):
                         %s, --------------------------------- qty_done
                         't', --done_wo
                         0, -- product_qty
-                        'done' --state
+                        'done', --state
+                        'Realigning moves and quants 10/2019'
                     )
     """
     env.cr.execute(insert_move_line_query , (location_dest_id, location_id, move_id, product_id, product_uom, qty,))
@@ -363,7 +356,10 @@ def find_current_quant_value(product_id, location_id):
     return current_quant_value
 
 def realign_quant_with_moves(product_id, location_id):
-    "makes the quants great again"
+    """
+        Compute what the current qty in stock should be:
+        Qty in stock at the migration - outbound moves + inbound moves
+    """
 
     # fix quant with and without company_id
     env.cr.execute("""
@@ -379,6 +375,15 @@ def realign_quant_with_moves(product_id, location_id):
                 """, (location_id, product_id,))
     merge_quant(product_id, location_id)
 
+    # Qty in stock at the migration
+    env.cr.execute("""
+                    SELECT COALESCE(sum(quantity),0)
+                    FROM migrated_stock_quant
+                    WHERE product_id = %s
+                    AND location_id = %s
+                    """,(product_id, location_id))
+    migrated_qty_in_stock = env.cr.fetchone()[0]
+
     env.cr.execute("""
                     SELECT
                         sum(quantity)
@@ -393,6 +398,7 @@ def realign_quant_with_moves(product_id, location_id):
                             m.state = 'done'
                             AND l.product_id = %s
                             AND l.location_id = %s
+                            AND l.date > %s
                     UNION ALL
                         SELECT
                             COALESCE(SUM(qty_done),0) AS quantity
@@ -403,16 +409,19 @@ def realign_quant_with_moves(product_id, location_id):
                             m.state = 'done'
                             AND l.product_id = %s
                             AND l.location_dest_id = %s
+                            AND l.date > %s
                     )
                     AS ml
-                    """,(product_id, location_id, product_id, location_id))
+                    """,(product_id, location_id, MIGRATION_DATE, product_id, location_id, MIGRATION_DATE))
 
-    quant_value_according_to_sml = env.cr.fetchone()[0]
+    net_diff_according_to_sml = env.cr.fetchone()[0]
+
+    quant_value_according_to_sml = migrated_qty_in_stock + net_diff_according_to_sml
 
     quant_current_value = find_current_quant_value(product_id, location_id)
 
     quant_delta = quant_value_according_to_sml - quant_current_value
-    print("  align quant with moves (%s)" % quant_delta )
+    log("  align quant with moves (%s)" % quant_delta )
     insert_quant_query = """
         INSERT INTO "stock_quant"
         (
@@ -447,21 +456,21 @@ def set_quants(product_id, location_id):
     "realign the quants"
 
     quant_desired_value = find_desired_quant_value(product_id, location_id)
-    print("  quant_desired_value (%s)" % (quant_desired_value,))
+    log("  quant_desired_value (%s)" % (quant_desired_value,))
     quant_current_value = find_current_quant_value(product_id, location_id)
-    print("  quant_current_value (%s)" % (quant_current_value,))
+    log("  quant_current_value (%s)" % (quant_current_value,))
     quant_delta = quant_desired_value - quant_current_value
     if quant_delta == 0:
-        print("  adapt the quant (+0) (already at the good value)")
+        log("  adapt the quant (+0) (already at the good value)")
         return
     elif quant_delta > 0:
         location_dest_id = location_id
         location_id = INVENTORY_LOCATION_ID
-        print("  adapt the quant (+%s)" % quant_delta)
+        log("  adapt the quant (+%s)" % quant_delta)
     else:
         location_dest_id = INVENTORY_LOCATION_ID
         quant_delta = -quant_delta
-        print("  adapt the quant (%s)" % quant_delta)
+        log("  adapt the quant (-%s)" % quant_delta)
 
     sql_inventory_adjustment(product_id, quant_delta, location_id, location_dest_id)
 
@@ -487,7 +496,7 @@ def is_stockable_product(product_id):
                     WHERE pp.id = %s
                     """, (product_id,))
     if not env.cr.rowcount:
-        print("  no template for product %s" % (product_id,))
+        log("  no template for product %s" % (product_id,))
         return
     else:
         return env.cr.fetchone()[0] == "product"
@@ -496,59 +505,65 @@ def max_product_id():
     env.cr.execute("""SELECT max(id) FROM product_product""")
     return env.cr.fetchone()[0]
 
-def get_next_product(last_product_id):
-  found_product = False
-  offset = 0
-  while not found_product:
-    print("get_next_product: offset:%s cron_id:%s" % (offset,CRON_ID,))
+def get_next_product(offset):
+  while True:
+    log("get_next_product: offset:%s cron_id:%s" % (offset,CRON_ID,))
+
     env.cr.execute("savepoint acquire_lock")
+    env.cr.execute("select id, product_id from product_locks where processed = false and id > %s order by id", (offset,))
+    row = env.cr.fetchone()
+
+    if not row:
+        return False, False
+
+    lock_id = row[0]
+    product_id = row[1]
+
     try:
-      env.cr.execute("select min(id) + %s from product_locks where processed = 'f' and id > %s ", (offset,last_product_id,))
-      min_id = env.cr.fetchone()[0]
-      offset += 1
-      env.cr.execute("select id from product_locks where id = %s for update nowait",(min_id,))
-      if env.cr.rowcount:
-        return min_id
-      if offset > MAX_OFFSET:
-        return
+        env.cr.execute("select id from product_locks where id = %s for update nowait",(lock_id,))
+        if env.cr.rowcount:
+            return product_id, lock_id
     except Exception as e:
         env.cr.execute('rollback to savepoint acquire_lock')
 
-def processed(product_id):
-    env.cr.execute("update product_locks set processed = 't' where id = %s",(product_id,))
+def processed(lock_id):
+    env.cr.execute("update product_locks set processed = true where id = %s",(lock_id,))
 
 def do_the_thing():
-
-    product_id = get_next_product(0)
+    product_id, lock_id = get_next_product(0)
     while product_id:
         if not is_stockable_product(product_id):
-            print("%s - product %s is not a stockable product, skip" %
+            log("%s - product %s is not a stockable product, skip" %
             (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id,))
-            processed(product_id)
+            processed(lock_id)
             if COMMIT_EACH_PRODUCT:
                 env.cr.commit()
-            product_id = get_next_product(product_id)
+            product_id, lock_id = get_next_product(lock_id)
             continue
         location_ids = find_locations(product_id)
         if not location_ids:
-            print("%s - no location_id for product %s, skip" %
+            log("%s - no location_id for product %s, skip" %
             (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id,))
-            processed(product_id)
+            processed(lock_id)
             if COMMIT_EACH_PRODUCT:
                 env.cr.commit()
-            product_id = get_next_product(product_id)
+            product_id, lock_id = get_next_product(lock_id)
             continue
         for location_id in location_ids:
-            print("%s - prepare to handle product %s on location %s (cron: %s)" %
+            log("%s - prepare to handle product %s on location %s (cron: %s)" %
             (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id, location_id, CRON_ID))
+
             realign_quant_with_moves(product_id, location_id)
+
             set_quants(product_id,location_id)
             merge_quant(product_id, location_id)
+
             current_quant = find_current_quant_value(product_id, location_id)
-            print("  current quant quantity: %s" % current_quant)
-            processed(product_id)
-            if COMMIT_EACH_PRODUCT:
-                env.cr.commit()
-            product_id = get_next_product(product_id)
+            log("  current quant quantity: %s" % current_quant)
+
+        processed(lock_id)
+        if COMMIT_EACH_PRODUCT:
+            env.cr.commit()
+        product_id, lock_id = get_next_product(lock_id)
 
 do_the_thing()
