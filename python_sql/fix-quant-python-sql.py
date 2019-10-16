@@ -42,8 +42,17 @@
 #       You can now start the same cron many times ... but you need some preparation
 #       - make a backup before and after
 #       - create the following table:
-#           CREATE TABLE product_locks (id SERIAL PRIMARY KEY, product_id INTEGER, processed BOOLEAN);
-#           INSERT INTO product_locks select nextval('product_locks_id_seq'), id, false from product_product;
+#           CREATE TABLE product_locks (id SERIAL PRIMARY KEY, product_id INTEGER, location_id INTEGER, processed BOOLEAN);
+#
+#            WITH product_to_fix as (
+#               SELECT DISTINCT product_id, location_id
+#               FROM qty_in_stock_analysis_16102019_before
+#               WHERE error_delta != 0
+#           )
+#           INSERT INTO product_locks
+#           SELECT nextval('product_locks_id_seq'), product_id, location_id, false
+#           FROM product_to_fix
+#           ORDER BY product_id, location_id;
 
 INVENTORY_LOCATION_ID = 5
 TIMESTAMP = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
@@ -384,6 +393,7 @@ def realign_quant_with_moves(product_id, location_id):
                     """,(product_id, location_id))
     migrated_qty_in_stock = env.cr.fetchone()[0]
 
+    # Sum of inbound and outbound moves
     env.cr.execute("""
                     SELECT
                         sum(quantity)
@@ -507,63 +517,49 @@ def max_product_id():
 
 def get_next_product(offset):
   while True:
-    log("get_next_product: offset:%s cron_id:%s" % (offset,CRON_ID,))
+    log("get_next_product: offset:%s cron_id:%s" % (offset, CRON_ID, ))
 
     env.cr.execute("savepoint acquire_lock")
-    env.cr.execute("select id, product_id from product_locks where processed = false and id > %s order by id", (offset,))
+    env.cr.execute("""
+        SELECT id, product_id, location_id
+        FROM product_locks
+        WHERE processed = false
+        AND id > %s
+        ORDER BY id
+    """, (offset,))
     row = env.cr.fetchone()
 
     if not row:
-        return False, False
+        return False, False, False
 
     lock_id = row[0]
     product_id = row[1]
+    location_id = row[2]
 
     try:
-        env.cr.execute("select id from product_locks where id = %s for update nowait",(lock_id,))
+        env.cr.execute("select id from product_locks where processed = false and id = %s for update nowait",(lock_id,))
         if env.cr.rowcount:
-            return product_id, lock_id
+            return product_id, location_id, lock_id
     except Exception as e:
+        offset=lock_id+1
         env.cr.execute('rollback to savepoint acquire_lock')
 
 def processed(lock_id):
     env.cr.execute("update product_locks set processed = true where id = %s",(lock_id,))
 
 def do_the_thing():
-    product_id, lock_id = get_next_product(0)
+    product_id, location_id, lock_id = get_next_product(0)
     while product_id:
-        if not is_stockable_product(product_id):
-            log("%s - product %s is not a stockable product, skip" %
-            (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id,))
-            processed(lock_id)
-            if COMMIT_EACH_PRODUCT:
-                env.cr.commit()
-            product_id, lock_id = get_next_product(lock_id)
-            continue
-        location_ids = find_locations(product_id)
-        if not location_ids:
-            log("%s - no location_id for product %s, skip" %
-            (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id,))
-            processed(lock_id)
-            if COMMIT_EACH_PRODUCT:
-                env.cr.commit()
-            product_id, lock_id = get_next_product(lock_id)
-            continue
-        for location_id in location_ids:
-            log("%s - prepare to handle product %s on location %s (cron: %s)" %
-            (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id, location_id, CRON_ID))
-
-            realign_quant_with_moves(product_id, location_id)
-
-            set_quants(product_id,location_id)
-            merge_quant(product_id, location_id)
-
-            current_quant = find_current_quant_value(product_id, location_id)
-            log("  current quant quantity: %s" % current_quant)
-
+        log("%s - prepare to handle product %s on location %s (cron: %s)" %
+        (datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S'), product_id, location_id, CRON_ID))
+        realign_quant_with_moves(product_id, location_id)
+        set_quants(product_id,location_id)
+        merge_quant(product_id, location_id)
+        current_quant = find_current_quant_value(product_id, location_id)
+        log("  current quant quantity: %s" % current_quant)
         processed(lock_id)
         if COMMIT_EACH_PRODUCT:
             env.cr.commit()
-        product_id, lock_id = get_next_product(lock_id)
+        product_id, location_id, lock_id = get_next_product(lock_id)
 
 do_the_thing()
